@@ -4,8 +4,6 @@ from telethon import events
 import asyncio
 from time import time
 from speedtest import Speedtest
-
-from main import botStartTime   # if not available, remove this line
 from bot import Bot             # import your bot client
 
 
