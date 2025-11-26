@@ -3,7 +3,7 @@
 # Ask Doubt on telegram @KingVJ01
 
 from main import Bot
-
+import TechVJ.speedtest
 
 Bot().run()
 
