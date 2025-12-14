@@ -638,6 +638,9 @@
 #     except:
 #         pass
 
+
+
+
 # Don't Remove Credit Tg - @VJ_Botz
 # Subscribe YouTube Channel For Amazing Bot https://youtube.com/@Tech_VJ
 # Ask Doubt on telegram @KingVJ01
@@ -724,7 +727,6 @@ def progress(current, total, message, type, start_time):
     with open(f'{message.id}{type}status.txt', "w") as fileup:
         fileup.write(text)
 
-# --- STOP BUTTON CALLBACK ---
 @Client.on_callback_query(filters.regex("stop_batch"))
 async def stop_batch_callback(client: Client, callback_query: CallbackQuery):
     chat_id = callback_query.message.chat.id
@@ -750,11 +752,10 @@ async def send_help(client: Client, message: Message):
 @Client.on_message(filters.command(["join"]))
 async def join_channel(client: Client, message: Message):
     if len(message.command) < 2:
-        await client.send_message(message.chat.id, "**Usage:** `/join https://t.me/+...`\n\nUse this to join private channels so the bot can access posts.")
+        await client.send_message(message.chat.id, "**Usage:** `/join https://t.me/+...`")
         return
 
     invite_link = message.command[1]
-    
     user_data = database.find_one({'chat_id': message.chat.id})
     if not get(user_data, 'logged_in', False) or user_data['session'] is None:
         await client.send_message(message.chat.id, strings['need_login'])
@@ -762,15 +763,17 @@ async def join_channel(client: Client, message: Message):
 
     msg = await client.send_message(message.chat.id, "Attempting to join...")
     try:
-        acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
+        # FIXED: Use :memory: to prevent disk corruption issues
+        acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
         await acc.connect()
         try:
             await acc.join_chat(invite_link)
-            await msg.edit("**Successfully joined the channel!** ✅\n\nYou can now send posts from this channel.")
+            await msg.edit("**Successfully joined the channel!** ✅")
         except UserAlreadyParticipant:
             await msg.edit("**You are already in this channel.**")
         except Exception as e:
             await msg.edit(f"**Failed to join:**\n`{e}`")
+        await acc.disconnect()
     except Exception as e:
         await msg.edit(f"**Session Error:**\n`{e}`")
 
@@ -778,11 +781,9 @@ async def join_channel(client: Client, message: Message):
 async def save(client: Client, message: Message):
     if "https://t.me/" in message.text:
         
-        # 1. CRASH FIX: Check for invite links
         if "t.me/+" in message.text or "joinchat" in message.text:
             return await client.send_message(message.chat.id, "**That looks like an invite link!**\nPlease use `/join <link>` to join the channel first.")
         
-        # 2. Reset Cancel Flag
         CANCEL_TASKS[message.chat.id] = False
 
         datas = message.text.split("/")
@@ -795,11 +796,11 @@ async def save(client: Client, message: Message):
             except:
                 toID = fromID
         except ValueError:
-            return await client.send_message(message.chat.id, "**Invalid Link Format.**\nPlease make sure you are sending a specific post link.")
+            return await client.send_message(message.chat.id, "**Invalid Link Format.**")
 
         total_batch = toID - fromID + 1
         current_count = 0
-        skipped_count = 0  # Initialize skipped counter
+        skipped_count = 0
         
         stop_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Stop Batch", callback_data="stop_batch")]])
         
@@ -810,12 +811,10 @@ async def save(client: Client, message: Message):
         )
 
         for msgid in range(fromID, toID+1):
-            
             if CANCEL_TASKS.get(message.chat.id):
                 break 
 
             current_count += 1
-            # Update Progress Message
             try:
                 await batch_msg.edit(
                     f"**Batch Progress:** {current_count}/{total_batch}\n**Skipped:** {skipped_count}\nProcessing ID: {msgid}",
@@ -824,8 +823,7 @@ async def save(client: Client, message: Message):
             except:
                 pass
             
-            # --- PROCESS LOGIC ---
-            success = False # Track success of this iteration
+            success = False
 
             if "https://t.me/c/" in message.text:
                 user_data = database.find_one({'chat_id': message.chat.id})
@@ -839,16 +837,19 @@ async def save(client: Client, message: Message):
                     await client.send_message(message.chat.id, "**Error:** Could not determine Channel ID.")
                     return
 
-                acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
+                # FIXED: Force in-memory session to avoid "stuck" disk sessions
+                acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
                 await acc.connect()
                 success = await handle_private(client, acc, message, chatid, msgid)
+                await acc.disconnect()
             
             elif "https://t.me/b/" in message.text:
                 user_data = database.find_one({"chat_id": message.chat.id})
                 if not get(user_data, 'logged_in', False) or user_data['session'] is None:
                     await client.send_message(message.chat.id, strings['need_login'])
                     return
-                acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
+                # FIXED: Force in-memory session
+                acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
                 await acc.connect()
                 username = datas[4]
                 try:
@@ -856,6 +857,7 @@ async def save(client: Client, message: Message):
                 except Exception as e:
                     logger.error(f"Error in bot handle: {e}")
                     success = False
+                await acc.disconnect()
 
             else:
                 username = datas[3]
@@ -873,17 +875,19 @@ async def save(client: Client, message: Message):
                         if not get(user_data, 'logged_in', False) or user_data['session'] is None:
                             await client.send_message(message.chat.id, strings['need_login'])
                             return
-                        acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
+                        # FIXED: Force in-memory session
+                        acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
                         await acc.connect()
                         success = await handle_private(client, acc, message, username, msgid)
+                        await acc.disconnect()
                     except Exception as e:
                         logger.error(f"Public channel fallback error: {e}")
                         success = False
             
             if not success:
-                skipped_count += 1 # Increment skip if failed
+                skipped_count += 1
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
         
         if not CANCEL_TASKS.get(message.chat.id):
             try:
@@ -892,23 +896,33 @@ async def save(client: Client, message: Message):
                 pass
             await client.send_message(message.chat.id, f"**Task Completed!** ✅\n\nTotal: {total_batch}\nSkipped: {skipped_count}")
 
-# Modified to return True (success) or False (failed/skipped)
 async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
+    msg = None
     try:
-        msg: Message = await acc.get_messages(chatid, msgid)
+        msg = await acc.get_messages(chatid, msgid)
     except Exception as e:
-        # Log to console instead of spamming chat
-        logger.warning(f"Message {msgid} skipped (Get Error): {e}")
-        # If it's a peer invalid error, we might want to warn once, but for batch processing, logging is safer
-        return False
+        # RETRY LOGIC: If peer invalid, scan dialogs to find the chat and refresh cache
+        if "Peer id invalid" in str(e) or "ChannelInvalid" in str(e):
+            try:
+                logger.info(f"Refreshing cache for {chatid}...")
+                # Iterate recent dialogs to find the chat and force Pyrogram to learn it
+                async for dialog in acc.get_dialogs(limit=500):
+                    if dialog.chat.id == chatid:
+                        logger.info(f"Found chat {chatid} in dialogs! Cache refreshed.")
+                        break
+                msg = await acc.get_messages(chatid, msgid)
+            except Exception as e2:
+                logger.warning(f"Message {msgid} skipped after retry: {e2}")
+                return False
+        else:
+            logger.warning(f"Message {msgid} skipped (Get Error): {e}")
+            return False
 
-    if msg.empty:
-        logger.info(f"Message {msgid} skipped: Empty/Deleted")
+    if msg is None or msg.empty:
         return False
 
     msg_type = get_message_type(msg)
     if not msg_type:
-        logger.info(f"Message {msgid} skipped: Unsupported Media Type")
         return False
 
     chat = message.chat.id
@@ -916,8 +930,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         try:
             await client.send_message(chat, msg.text, entities=msg.entities, reply_to_message_id=message.id)
             return True
-        except Exception as e:
-            logger.error(f"Text send error {msgid}: {e}")
+        except Exception:
             return False
 
     smsg = await client.send_message(message.chat.id, 'Downloading', reply_to_message_id=message.id)
@@ -929,10 +942,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         file = await acc.download_media(msg, progress=progress, progress_args=[message, "down", start_time])
         os.remove(f'{message.id}downstatus.txt')
     except Exception as e:
-        # LOG ERROR instead of sending to chat
         logger.error(f"Download skipped {msgid}: {e}")
         await client.delete_messages(message.chat.id, [smsg.id])
-        return False # Return failure
+        return False
     
     upsta = asyncio.create_task(upstatus(client, f'{message.id}upstatus.txt', smsg))
     
@@ -988,7 +1000,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         os.remove(f'{message.id}upstatus.txt')
         os.remove(file)
     await client.delete_messages(message.chat.id,[smsg.id])
-    return True # Return success
+    return True
 
 def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
     if hasattr(msg, 'document') and msg.document: return "Document"
