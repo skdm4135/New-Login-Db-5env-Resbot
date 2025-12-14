@@ -639,8 +639,6 @@
 #         pass
 
 
-
-
 # Don't Remove Credit Tg - @VJ_Botz
 # Subscribe YouTube Channel For Amazing Bot https://youtube.com/@Tech_VJ
 # Ask Doubt on telegram @KingVJ01
@@ -649,13 +647,16 @@ import asyncio
 import pyrogram
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated, UserAlreadyParticipant, InviteHashExpired, UsernameNotOccupied
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message 
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 import time
 import math
 import os
 from config import API_ID, API_HASH
 from database.db import database 
 from TechVJ.strings import strings, HELP_TXT
+
+# Global Dictionary to track cancellation states
+CANCEL_TASKS = {}
 
 def get(obj, key, default=None):
     try:
@@ -719,6 +720,14 @@ def progress(current, total, message, type, start_time):
     with open(f'{message.id}{type}status.txt', "w") as fileup:
         fileup.write(text)
 
+# --- STOP BUTTON CALLBACK ---
+@Client.on_callback_query(filters.regex("stop_batch"))
+async def stop_batch_callback(client: Client, callback_query: CallbackQuery):
+    chat_id = callback_query.message.chat.id
+    CANCEL_TASKS[chat_id] = True
+    await callback_query.answer("Stopping batch process...", show_alert=True)
+    await callback_query.message.edit_text("🛑 **Process Stopped by User.**")
+
 @Client.on_message(filters.command(["start"]))
 async def send_start(client: Client, message: Message):
     buttons = [[
@@ -734,8 +743,7 @@ async def send_start(client: Client, message: Message):
 async def send_help(client: Client, message: Message):
     await client.send_message(message.chat.id, f"{HELP_TXT}")
 
-# --- NEW JOIN COMMAND ---
-@Client.on_message(filters.command(["join", "joinprivatechannel"]))
+@Client.on_message(filters.command(["join"]))
 async def join_channel(client: Client, message: Message):
     if len(message.command) < 2:
         await client.send_message(message.chat.id, "**Usage:** `/join https://t.me/+...`\n\nUse this to join private channels so the bot can access posts.")
@@ -761,33 +769,55 @@ async def join_channel(client: Client, message: Message):
             await msg.edit(f"**Failed to join:**\n`{e}`")
     except Exception as e:
         await msg.edit(f"**Session Error:**\n`{e}`")
-# ------------------------
 
 @Client.on_message(filters.text & filters.private)
 async def save(client: Client, message: Message):
     if "https://t.me/" in message.text:
         
-        # --- CRASH FIX FOR INVITE LINKS ---
+        # 1. CRASH FIX: Check for invite links or non-post links
         if "t.me/+" in message.text or "joinchat" in message.text:
-            return await client.send_message(message.chat.id, "**To join a private channel, please use:**\n`/join https://t.me/+...`")
-        # ----------------------------------
+            return await client.send_message(message.chat.id, "**That looks like an invite link!**\nPlease use `/join <link>` to join the channel first.")
+        
+        # 2. Reset Cancel Flag
+        CANCEL_TASKS[message.chat.id] = False
 
         datas = message.text.split("/")
-        temp = datas[-1].replace("?single","").split("-")
-        fromID = int(temp[0].strip())
+        
+        # 3. ROBUST PARSING (Prevents invalid literal int() error)
         try:
-            toID = int(temp[1].strip())
-        except:
-            toID = fromID
+            temp = datas[-1].replace("?single","").split("-")
+            fromID = int(temp[0].strip())
+            try:
+                toID = int(temp[1].strip())
+            except:
+                toID = fromID
+        except ValueError:
+            return await client.send_message(message.chat.id, "**Invalid Link Format.**\nPlease make sure you are sending a specific post link.")
 
         total_batch = toID - fromID + 1
         current_count = 0
-        batch_msg = await client.send_message(message.chat.id, f"**Batch Progress:** 0/{total_batch}\nStarting...")
+        
+        # 4. Stop Button Markup
+        stop_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Stop Batch", callback_data="stop_batch")]])
+        
+        batch_msg = await client.send_message(
+            message.chat.id, 
+            f"**Batch Progress:** 0/{total_batch}\nStarting...",
+            reply_markup=stop_markup
+        )
 
         for msgid in range(fromID, toID+1):
+            
+            # 5. Check Cancellation
+            if CANCEL_TASKS.get(message.chat.id):
+                break # Stop the loop
+
             current_count += 1
             try:
-                await batch_msg.edit(f"**Batch Progress:** {current_count}/{total_batch}\nProcessing ID: {msgid}")
+                await batch_msg.edit(
+                    f"**Batch Progress:** {current_count}/{total_batch}\nProcessing ID: {msgid}",
+                    reply_markup=stop_markup
+                )
             except:
                 pass
 
@@ -796,9 +826,15 @@ async def save(client: Client, message: Message):
                 if not get(user_data, 'logged_in', False) or user_data['session'] is None:
                     await client.send_message(message.chat.id, strings['need_login'])
                     return
+                
+                try:
+                    chatid = int("-100" + datas[4])
+                except ValueError:
+                    await client.send_message(message.chat.id, "**Error:** Could not determine Channel ID. Please check the link.")
+                    return
+
                 acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
                 await acc.connect()
-                chatid = int("-100" + datas[4])
                 await handle_private(client, acc, message, chatid, msgid)
             elif "https://t.me/b/" in message.text:
                 user_data = database.find_one({"chat_id": message.chat.id})
@@ -834,14 +870,24 @@ async def save(client: Client, message: Message):
                         await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
             await asyncio.sleep(3)
         
-        try:
-            await batch_msg.delete()
-        except:
-            pass
-        await client.send_message(message.chat.id, "**Task Completed!** ✅")
+        # Cleanup
+        if not CANCEL_TASKS.get(message.chat.id):
+            try:
+                await batch_msg.delete()
+            except:
+                pass
+            await client.send_message(message.chat.id, "**Task Completed!** ✅")
 
 async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
-    msg: Message = await acc.get_messages(chatid, msgid)
+    try:
+        msg: Message = await acc.get_messages(chatid, msgid)
+    except Exception as e:
+        # Handle PeerIdInvalid by warning the user
+        if "Peer id invalid" in str(e):
+             await client.send_message(message.chat.id, f"**Error:** I can't access this channel.\nPlease use `/join` with the invite link first.")
+             return
+        return
+
     msg_type = get_message_type(msg)
     chat = message.chat.id
     if "Text" == msg_type:
