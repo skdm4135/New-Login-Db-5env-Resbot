@@ -638,7 +638,6 @@
 #     except:
 #         pass
 
-
 # Don't Remove Credit Tg - @VJ_Botz
 # Subscribe YouTube Channel For Amazing Bot https://youtube.com/@Tech_VJ
 # Ask Doubt on telegram @KingVJ01
@@ -879,14 +878,19 @@ async def save(client: Client, message: Message):
             await client.send_message(message.chat.id, "**Task Completed!** ✅")
 
 async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
+    # --- FIX FOR PEER ID INVALID ---
     try:
+        # Try fetching message directly
         msg: Message = await acc.get_messages(chatid, msgid)
     except Exception as e:
-        # Handle PeerIdInvalid by warning the user
-        if "Peer id invalid" in str(e):
-             await client.send_message(message.chat.id, f"**Error:** I can't access this channel.\nPlease use `/join` with the invite link first.")
+        # If it fails (PeerIdInvalid), try to refresh the cache by fetching the chat info first
+        try:
+            await acc.get_chat(chatid)
+            msg: Message = await acc.get_messages(chatid, msgid)
+        except Exception as e2:
+             await client.send_message(message.chat.id, f"**Error:** I can't access this channel even after retrying.\nPlease double-check if you are a member of this private channel.\nError: `{e2}`")
              return
-        return
+    # -------------------------------
 
     msg_type = get_message_type(msg)
     chat = message.chat.id
