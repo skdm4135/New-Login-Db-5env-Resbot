@@ -650,9 +650,14 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, 
 import time
 import math
 import os
+import logging
 from config import API_ID, API_HASH
 from database.db import database 
 from TechVJ.strings import strings, HELP_TXT
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Global Dictionary to track cancellation states
 CANCEL_TASKS = {}
@@ -773,7 +778,7 @@ async def join_channel(client: Client, message: Message):
 async def save(client: Client, message: Message):
     if "https://t.me/" in message.text:
         
-        # 1. CRASH FIX: Check for invite links or non-post links
+        # 1. CRASH FIX: Check for invite links
         if "t.me/+" in message.text or "joinchat" in message.text:
             return await client.send_message(message.chat.id, "**That looks like an invite link!**\nPlease use `/join <link>` to join the channel first.")
         
@@ -782,7 +787,6 @@ async def save(client: Client, message: Message):
 
         datas = message.text.split("/")
         
-        # 3. ROBUST PARSING (Prevents invalid literal int() error)
         try:
             temp = datas[-1].replace("?single","").split("-")
             fromID = int(temp[0].strip())
@@ -795,30 +799,33 @@ async def save(client: Client, message: Message):
 
         total_batch = toID - fromID + 1
         current_count = 0
+        skipped_count = 0  # Initialize skipped counter
         
-        # 4. Stop Button Markup
         stop_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Stop Batch", callback_data="stop_batch")]])
         
         batch_msg = await client.send_message(
             message.chat.id, 
-            f"**Batch Progress:** 0/{total_batch}\nStarting...",
+            f"**Batch Progress:** 0/{total_batch}\n**Skipped:** 0\nStarting...",
             reply_markup=stop_markup
         )
 
         for msgid in range(fromID, toID+1):
             
-            # 5. Check Cancellation
             if CANCEL_TASKS.get(message.chat.id):
-                break # Stop the loop
+                break 
 
             current_count += 1
+            # Update Progress Message
             try:
                 await batch_msg.edit(
-                    f"**Batch Progress:** {current_count}/{total_batch}\nProcessing ID: {msgid}",
+                    f"**Batch Progress:** {current_count}/{total_batch}\n**Skipped:** {skipped_count}\nProcessing ID: {msgid}",
                     reply_markup=stop_markup
                 )
             except:
                 pass
+            
+            # --- PROCESS LOGIC ---
+            success = False # Track success of this iteration
 
             if "https://t.me/c/" in message.text:
                 user_data = database.find_one({'chat_id': message.chat.id})
@@ -829,12 +836,13 @@ async def save(client: Client, message: Message):
                 try:
                     chatid = int("-100" + datas[4])
                 except ValueError:
-                    await client.send_message(message.chat.id, "**Error:** Could not determine Channel ID. Please check the link.")
+                    await client.send_message(message.chat.id, "**Error:** Could not determine Channel ID.")
                     return
 
                 acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
                 await acc.connect()
-                await handle_private(client, acc, message, chatid, msgid)
+                success = await handle_private(client, acc, message, chatid, msgid)
+            
             elif "https://t.me/b/" in message.text:
                 user_data = database.find_one({"chat_id": message.chat.id})
                 if not get(user_data, 'logged_in', False) or user_data['session'] is None:
@@ -844,9 +852,11 @@ async def save(client: Client, message: Message):
                 await acc.connect()
                 username = datas[4]
                 try:
-                    await handle_private(client, acc, message, username, msgid)
+                    success = await handle_private(client, acc, message, username, msgid)
                 except Exception as e:
-                    await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                    logger.error(f"Error in bot handle: {e}")
+                    success = False
+
             else:
                 username = datas[3]
                 try:
@@ -856,6 +866,7 @@ async def save(client: Client, message: Message):
                     return
                 try:
                     await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                    success = True
                 except:
                     try:    
                         user_data = database.find_one({"chat_id": message.chat.id})
@@ -864,120 +875,120 @@ async def save(client: Client, message: Message):
                             return
                         acc = Client("saverestricted", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID)
                         await acc.connect()
-                        await handle_private(client, acc, message, username, msgid)
+                        success = await handle_private(client, acc, message, username, msgid)
                     except Exception as e:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                        logger.error(f"Public channel fallback error: {e}")
+                        success = False
+            
+            if not success:
+                skipped_count += 1 # Increment skip if failed
+
             await asyncio.sleep(3)
         
-        # Cleanup
         if not CANCEL_TASKS.get(message.chat.id):
             try:
                 await batch_msg.delete()
             except:
                 pass
-            await client.send_message(message.chat.id, "**Task Completed!** ✅")
+            await client.send_message(message.chat.id, f"**Task Completed!** ✅\n\nTotal: {total_batch}\nSkipped: {skipped_count}")
 
+# Modified to return True (success) or False (failed/skipped)
 async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
-    # --- FIX FOR PEER ID INVALID ---
     try:
-        # Try fetching message directly
         msg: Message = await acc.get_messages(chatid, msgid)
     except Exception as e:
-        # If it fails (PeerIdInvalid), try to refresh the cache by fetching the chat info first
-        try:
-            await acc.get_chat(chatid)
-            msg: Message = await acc.get_messages(chatid, msgid)
-        except Exception as e2:
-             await client.send_message(message.chat.id, f"**Error:** I can't access this channel even after retrying.\nPlease double-check if you are a member of this private channel.\nError: `{e2}`")
-             return
-    # -------------------------------
+        # Log to console instead of spamming chat
+        logger.warning(f"Message {msgid} skipped (Get Error): {e}")
+        # If it's a peer invalid error, we might want to warn once, but for batch processing, logging is safer
+        return False
+
+    if msg.empty:
+        logger.info(f"Message {msgid} skipped: Empty/Deleted")
+        return False
 
     msg_type = get_message_type(msg)
+    if not msg_type:
+        logger.info(f"Message {msgid} skipped: Unsupported Media Type")
+        return False
+
     chat = message.chat.id
     if "Text" == msg_type:
         try:
             await client.send_message(chat, msg.text, entities=msg.entities, reply_to_message_id=message.id)
+            return True
         except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-            return
+            logger.error(f"Text send error {msgid}: {e}")
+            return False
 
     smsg = await client.send_message(message.chat.id, 'Downloading', reply_to_message_id=message.id)
     dosta = asyncio.create_task(downstatus(client, f'{message.id}downstatus.txt', smsg))
     start_time = time.time()
+    
+    file = None
     try:
         file = await acc.download_media(msg, progress=progress, progress_args=[message, "down", start_time])
         os.remove(f'{message.id}downstatus.txt')
     except Exception as e:
-        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)  
+        # LOG ERROR instead of sending to chat
+        logger.error(f"Download skipped {msgid}: {e}")
+        await client.delete_messages(message.chat.id, [smsg.id])
+        return False # Return failure
     
     upsta = asyncio.create_task(upstatus(client, f'{message.id}upstatus.txt', smsg))
+    
     if msg.caption:
         caption = msg.caption
     else:
         caption = None
     start_time = time.time()
 
-    if "Document" == msg_type:
-        try:
-            ph_path = await acc.download_media(msg.document.thumbs[0].file_id)
-        except:
-            ph_path = None
-        try:
+    try:
+        if "Document" == msg_type:
+            try:
+                ph_path = await acc.download_media(msg.document.thumbs[0].file_id)
+            except:
+                ph_path = None
             await client.send_document(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id, progress=progress, progress_args=[message, "up", start_time])
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-        if ph_path != None: os.remove(ph_path)
+            if ph_path != None: os.remove(ph_path)
 
-    elif "Video" == msg_type:
-        try:
-            ph_path = await acc.download_media(msg.video.thumbs[0].file_id)
-        except:
-            ph_path = None
-        try:
+        elif "Video" == msg_type:
+            try:
+                ph_path = await acc.download_media(msg.video.thumbs[0].file_id)
+            except:
+                ph_path = None
             await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width, height=msg.video.height, thumb=ph_path, caption=caption, reply_to_message_id=message.id, progress=progress, progress_args=[message, "up", start_time])
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-        if ph_path != None: os.remove(ph_path)
+            if ph_path != None: os.remove(ph_path)
 
-    elif "Animation" == msg_type:
-        try:
+        elif "Animation" == msg_type:
             await client.send_animation(chat, file, reply_to_message_id=message.id)
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
 
-    elif "Sticker" == msg_type:
-        try:
+        elif "Sticker" == msg_type:
             await client.send_sticker(chat, file, reply_to_message_id=message.id)
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
 
-    elif "Voice" == msg_type:
-        try:
+        elif "Voice" == msg_type:
             await client.send_voice(chat, file, caption=caption, caption_entities=msg.caption_entities, reply_to_message_id=message.id, progress=progress, progress_args=[message, "up", start_time])
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
 
-    elif "Audio" == msg_type:
-        try:
-            ph_path = await acc.download_media(msg.audio.thumbs[0].file_id)
-        except:
-            ph_path = None
-        try:
+        elif "Audio" == msg_type:
+            try:
+                ph_path = await acc.download_media(msg.audio.thumbs[0].file_id)
+            except:
+                ph_path = None
             await client.send_audio(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id, progress=progress, progress_args=[message, "up", start_time])   
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-        if ph_path != None: os.remove(ph_path)
+            if ph_path != None: os.remove(ph_path)
 
-    elif "Photo" == msg_type:
-        try:
+        elif "Photo" == msg_type:
             await client.send_photo(chat, file, caption=caption, reply_to_message_id=message.id)
-        except Exception as e:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-    
+            
+    except Exception as e:
+        logger.error(f"Upload skipped {msgid}: {e}")
+        await client.delete_messages(message.chat.id, [smsg.id])
+        return False
+
     if os.path.exists(f'{message.id}upstatus.txt'): 
         os.remove(f'{message.id}upstatus.txt')
         os.remove(file)
     await client.delete_messages(message.chat.id,[smsg.id])
+    return True # Return success
 
 def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
     if hasattr(msg, 'document') and msg.document: return "Document"
@@ -988,3 +999,4 @@ def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
     if hasattr(msg, 'audio') and msg.audio: return "Audio"
     if hasattr(msg, 'photo') and msg.photo: return "Photo"
     if hasattr(msg, 'text') and msg.text: return "Text"
+    return None
