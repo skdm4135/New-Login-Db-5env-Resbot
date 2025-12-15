@@ -763,8 +763,8 @@ async def join_channel(client: Client, message: Message):
 
     msg = await client.send_message(message.chat.id, "Attempting to join...")
     try:
-        # FIXED: Use :memory: to prevent disk corruption issues
-        acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
+        # no_updates=True fixes the SQLite error here too
+        acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True, no_updates=True)
         await acc.connect()
         try:
             await acc.join_chat(invite_link)
@@ -810,85 +810,77 @@ async def save(client: Client, message: Message):
             reply_markup=stop_markup
         )
 
-        for msgid in range(fromID, toID+1):
-            if CANCEL_TASKS.get(message.chat.id):
-                break 
+        user_data = database.find_one({'chat_id': message.chat.id})
+        if not get(user_data, 'logged_in', False) or user_data['session'] is None:
+            await client.send_message(message.chat.id, strings['need_login'])
+            return
 
-            current_count += 1
-            try:
-                await batch_msg.edit(
-                    f"**Batch Progress:** {current_count}/{total_batch}\n**Skipped:** {skipped_count}\nProcessing ID: {msgid}",
-                    reply_markup=stop_markup
-                )
-            except:
-                pass
-            
-            success = False
-
-            if "https://t.me/c/" in message.text:
-                user_data = database.find_one({'chat_id': message.chat.id})
-                if not get(user_data, 'logged_in', False) or user_data['session'] is None:
-                    await client.send_message(message.chat.id, strings['need_login'])
-                    return
-                
-                try:
-                    chatid = int("-100" + datas[4])
-                except ValueError:
-                    await client.send_message(message.chat.id, "**Error:** Could not determine Channel ID.")
-                    return
-
-                # FIXED: Force in-memory session to avoid "stuck" disk sessions
-                acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
-                await acc.connect()
-                success = await handle_private(client, acc, message, chatid, msgid)
-                await acc.disconnect()
-            
-            elif "https://t.me/b/" in message.text:
-                user_data = database.find_one({"chat_id": message.chat.id})
-                if not get(user_data, 'logged_in', False) or user_data['session'] is None:
-                    await client.send_message(message.chat.id, strings['need_login'])
-                    return
-                # FIXED: Force in-memory session
-                acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
-                await acc.connect()
-                username = datas[4]
-                try:
-                    success = await handle_private(client, acc, message, username, msgid)
-                except Exception as e:
-                    logger.error(f"Error in bot handle: {e}")
-                    success = False
-                await acc.disconnect()
-
-            else:
-                username = datas[3]
-                try:
-                    msg = await client.get_messages(username, msgid)
-                except UsernameNotOccupied: 
-                    await client.send_message(message.chat.id, "The username is not occupied by anyone", reply_to_message_id=message.id)
-                    return
-                try:
-                    await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                    success = True
-                except:
-                    try:    
-                        user_data = database.find_one({"chat_id": message.chat.id})
-                        if not get(user_data, 'logged_in', False) or user_data['session'] is None:
-                            await client.send_message(message.chat.id, strings['need_login'])
-                            return
-                        # FIXED: Force in-memory session
-                        acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True)
-                        await acc.connect()
-                        success = await handle_private(client, acc, message, username, msgid)
-                        await acc.disconnect()
-                    except Exception as e:
-                        logger.error(f"Public channel fallback error: {e}")
-                        success = False
-            
-            if not success:
-                skipped_count += 1
-
-            await asyncio.sleep(2)
+        # --- OPTIMIZATION: Single Connection + No Updates ---
+        # no_updates=True prevents the sqlite error and saves bandwidth
+        acc = Client(name=":memory:", session_string=user_data['session'], api_hash=API_HASH, api_id=API_ID, in_memory=True, no_updates=True)
+        await acc.connect()
         
+        try:
+            for msgid in range(fromID, toID+1):
+                if CANCEL_TASKS.get(message.chat.id):
+                    break 
+
+                current_count += 1
+                try:
+                    await batch_msg.edit(
+                        f"**Batch Progress:** {current_count}/{total_batch}\n**Skipped:** {skipped_count}\nProcessing ID: {msgid}",
+                        reply_markup=stop_markup
+                    )
+                except:
+                    pass
+                
+                success = False
+
+                if "https://t.me/c/" in message.text:
+                    try:
+                        chatid = int("-100" + datas[4])
+                        # Use the already connected 'acc'
+                        success = await handle_private(client, acc, message, chatid, msgid)
+                    except ValueError:
+                        await client.send_message(message.chat.id, "**Error:** Could not determine Channel ID.")
+                        break
+
+                elif "https://t.me/b/" in message.text:
+                    username = datas[4]
+                    try:
+                        success = await handle_private(client, acc, message, username, msgid)
+                    except Exception as e:
+                        logger.error(f"Error in bot handle: {e}")
+                        success = False
+
+                else:
+                    username = datas[3]
+                    try:
+                        msg = await client.get_messages(username, msgid)
+                    except UsernameNotOccupied: 
+                        await client.send_message(message.chat.id, "The username is not occupied by anyone", reply_to_message_id=message.id)
+                        break
+                    try:
+                        await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                        success = True
+                    except:
+                        try:    
+                            # Use the already connected 'acc'
+                            success = await handle_private(client, acc, message, username, msgid)
+                        except Exception as e:
+                            logger.error(f"Public channel fallback error: {e}")
+                            success = False
+                
+                if not success:
+                    skipped_count += 1
+
+                # Small delay to be polite to the server
+                await asyncio.sleep(2)
+        
+        finally:
+            # Clean disconnect only once at the end
+            await acc.disconnect()
+
         if not CANCEL_TASKS.get(message.chat.id):
             try:
                 await batch_msg.delete()
@@ -901,11 +893,11 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     try:
         msg = await acc.get_messages(chatid, msgid)
     except Exception as e:
-        # RETRY LOGIC: If peer invalid, scan dialogs to find the chat and refresh cache
         if "Peer id invalid" in str(e) or "ChannelInvalid" in str(e):
             try:
                 logger.info(f"Refreshing cache for {chatid}...")
-                # Iterate recent dialogs to find the chat and force Pyrogram to learn it
+                # We need to use get_dialogs to refresh cache.
+                # Since no_updates=True, we can still use methods, just no background listeners.
                 async for dialog in acc.get_dialogs(limit=500):
                     if dialog.chat.id == chatid:
                         logger.info(f"Found chat {chatid} in dialogs! Cache refreshed.")
@@ -914,6 +906,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             except Exception as e2:
                 logger.warning(f"Message {msgid} skipped after retry: {e2}")
                 return False
+        elif "FloodWait" in str(e):
+             logger.error(f"FloodWait in handle_private: {e}")
+             return False
         else:
             logger.warning(f"Message {msgid} skipped (Get Error): {e}")
             return False
